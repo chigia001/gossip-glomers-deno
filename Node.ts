@@ -41,6 +41,7 @@ export const rpc = async <RequestBody extends MessageBody, ResponseBody extends 
     const msgId = send(dest, body)
     try {
         return await new Promise<ResponseBody>((resolve, reject) => {
+            // TODO: add timeout logic
             rpcPromiseMap.set(msgId, {
                 resolve, reject
             })
@@ -89,6 +90,17 @@ export const init = async () => {
         const src = req.src
         const type = req.body.type
         const msgId = req.body.msg_id
+        const inReplyTo = req.body.in_reply_to
+
+        if (inReplyTo !== undefined) {
+            const defer = rpcPromiseMap.get(inReplyTo)
+            if (type === "error") {
+                defer?.reject(req.body)
+            } else {
+                defer?.resolve(req.body)
+            }
+            continue
+        }
         const reply = (res:  Omit<MessageBody, "msg_id">): void => {
             send(src, {
                 ...res,
