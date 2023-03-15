@@ -48,17 +48,25 @@ export const rpc = async <
   RequestBody extends Omit<MessageBody, "msg_id">,
   ResponseBody extends Omit<MessageBody, "msg_id">,
 >(dest: string, body: RequestBody): Promise<ResponseBody> => {
-  const msgId = send(dest, body);
-  try {
-    return await new Promise<ResponseBody>((resolve, reject) => {
-      // TODO: add timeout logic
-      rpcPromiseMap.set(msgId, {
-        resolve,
-        reject,
+  while (true) {
+    const msgId = send(dest, body);
+    try {
+      const resp = await new Promise<ResponseBody>((resolve, reject) => {
+        rpcPromiseMap.set(msgId, {
+          resolve,
+          reject,
+        });
+
+        setTimeout(() => {
+          reject();
+        }, 10);
       });
-    });
-  } finally {
-    rpcPromiseMap.delete(msgId);
+      return resp;
+    } catch {
+        console.warn("retrying")
+    }finally {
+      rpcPromiseMap.delete(msgId);
+    }
   }
 };
 
