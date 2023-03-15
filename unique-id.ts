@@ -4,7 +4,7 @@ let counter = 0
 handle<
     {type: "generate"}, 
     {type: "generate_ok", id: string}
->("generate", (_src, req, reply) => {
+>("generate", (_src, _req, reply) => {
     reply({
         type: "generate_ok",
         id: `${nodeId}_${counter++}`

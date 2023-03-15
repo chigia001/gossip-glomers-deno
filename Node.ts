@@ -107,8 +107,5 @@ export const init = async () => {
                 text: `Don't have handler for event ${type}`
             })
         }
-
-
-        handlers.get(type)?.(src, req.body, reply)
     }
 }
