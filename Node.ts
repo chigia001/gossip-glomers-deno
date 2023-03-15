@@ -76,6 +76,7 @@ interface InitializeResBody extends MessageBody{
 export const init = async () => {
     handle<InitializeReqBody, InitializeResBody>("init", (_src, req, reply) => {
         nodeId = req.node_id
+        nodeIds = req.node_ids
         reply({
             type: "init_ok"
         })
