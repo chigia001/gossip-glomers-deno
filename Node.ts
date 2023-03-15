@@ -32,8 +32,8 @@ export const send = <RequestBody extends Omit<MessageBody, "msg_id">>(dest: stri
             msg_id: msgId
         }
     } satisfies Message)
+    // send message to STDOUT
     console.log(serialize)
-    console.warn(serialize)
     return msgId
 }
 
