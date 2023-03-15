@@ -1,9 +1,11 @@
-type NodeId = `n${number}`
+type NodeIdType = `n${number}`
 
-export let nodeId: NodeId
-export let nodeIds: NodeId[]
+let nodeId: NodeIdType 
+let nodeIds: NodeIdType[] = []
 let msgCounter = 0
 
+export const NodeId = () => nodeId
+export const NodeIds = () => nodeIds
 
 interface MessageBody {
     type: string
@@ -65,8 +67,8 @@ export const handle = <RequestBody extends Omit<MessageBody, "msg_id">, Response
 
 interface InitializeReqBody extends MessageBody{
     type     : "init",
-    node_id  : NodeId,
-    node_ids : NodeId[]
+    node_id  : NodeIdType,
+    node_ids : NodeIdType[]
 }
 
 interface InitializeResBody extends MessageBody{

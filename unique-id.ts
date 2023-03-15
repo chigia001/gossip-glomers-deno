@@ -1,5 +1,5 @@
 #!/usr/bin/env -S deno run --allow-env
-import { handle, init, nodeId, nodeIds, rpc, send } from "./Node.ts";
+import { handle, init, NodeId, NodeIds, rpc, send } from "./Node.ts";
 let counter = 0
 handle<
     {type: "generate"}, 
@@ -7,7 +7,7 @@ handle<
 >("generate", (_src, _req, reply) => {
     reply({
         type: "generate_ok",
-        id: `${nodeId}_${counter++}`
+        id: `${NodeId()}_${counter++}`
     })
 })
 

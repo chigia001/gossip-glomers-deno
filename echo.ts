@@ -1,5 +1,5 @@
 #!/usr/bin/env -S deno run --allow-env
-import { handle, init, nodeId, nodeIds, rpc, send } from "./Node.ts";
+import { handle, init, NodeId, NodeIds, rpc, send } from "./Node.ts";
 
 handle<
     {type: "echo", echo: any}, 
