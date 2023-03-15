@@ -59,7 +59,7 @@ export const rpc = async <
 
         setTimeout(() => {
           reject();
-        }, 10);
+        }, 500);
       });
       return resp;
     } catch {
