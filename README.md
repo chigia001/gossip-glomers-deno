@@ -1,7 +1,7 @@
 # Gossip Glommers Challenges using Deno
 
 ## Prerequisites:
-- [Maelstrom](https://github.com/jepsen-io/maelstrom/blob/main/doc/01-getting-ready/index.md)
+- [Maelstrom](https://github.com/jepsen-io/maelstrom/blob/main/doc/01-getting-ready/index.md): add maelstrom.jar file to lib folder
 - [Deno](https://deno.land/manual@v1.31.2/getting_started)
 
 ## Challenges:
