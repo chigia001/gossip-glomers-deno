@@ -3,14 +3,21 @@ import { handle, init, NodeId, NodeIdType, rpcWithFeedback } from "./Node.ts";
 let topology: Record<NodeIdType, NodeIdType[]>;
 // message that successfully consumed and already broardcast to peer with confirmation
 const completeMessages = new Set<number>();
+const completedNodes = new Map<number, NodeIdType[]>();
 
 interface IncompleteMessageInfo {
   path: Set<NodeIdType>;
   sendNodes: Set<NodeIdType>;
   timeout: number;
   unsendPeers: Set<NodeIdType>;
-  inflightPromise: Promise<void>;
+  inflightPromise: Promise<NodeIdType[]>;
+  srcFeedback: Map<NodeIdType, (param: PeerInform) => void>;
 }
+
+const markComplete = (info: IncompleteMessageInfo, nodeId: NodeIdType) => {
+  info.unsendPeers.delete(nodeId);
+  info.sendNodes.add(nodeId);
+};
 const incompleteMessages = new Map<number, IncompleteMessageInfo>();
 
 interface Broadcast {
@@ -39,11 +46,10 @@ const sendBroadcastPeer = async (dest: NodeIdType, message: number) => {
 
       const feedback = ({ sendeds }: PeerInform) => {
         sendeds.forEach((node) => {
-          incompleteMessage.sendNodes.add(node);
-          incompleteMessage.unsendPeers.delete(node);
+          markComplete(incompleteMessage, node);
         });
       };
-      await rpcWithFeedback<PeerBroadcast, PeerInform, PeerInform>(
+      await rpcWithFeedback<PeerBroadcast, {}, PeerInform>(
         dest,
         {
           type: "broadcast_peer",
@@ -54,41 +60,46 @@ const sendBroadcastPeer = async (dest: NodeIdType, message: number) => {
         },
         feedback,
         {
-          timeout: incompleteMessage.timeout * 2,
+          timeout: incompleteMessage.timeout,
         },
       );
 
-      incompleteMessage.sendNodes.add(dest);
-      incompleteMessage.unsendPeers.delete(dest);
+      markComplete(incompleteMessage, dest);
       return;
     } catch {
+      console.warn("retry");
     }
   }
 };
 
 const handleBroadcast = async (
+  src: NodeIdType,
   message: number,
   sendeds: NodeIdType[],
   path: NodeIdType[],
   timeout: number,
   feedback?: (param: PeerInform) => void,
-) => {
-
+): Promise<NodeIdType[]> => {
   const incompleteMessage = incompleteMessages.get(message);
   if (incompleteMessage) {
     sendeds.forEach((node) => {
-      incompleteMessage.sendNodes.add(node);
-      incompleteMessage.unsendPeers.delete(node);
+      markComplete(incompleteMessage, node);
     });
     path.forEach((node) => {
       incompleteMessage.path.add(node);
       incompleteMessage.unsendPeers.delete(node);
     });
+    if (feedback) {
+      feedback({
+        sendeds: [...incompleteMessage.sendNodes.values()],
+      });
+      incompleteMessage.srcFeedback.set(src, feedback);
+    }
     return incompleteMessage.inflightPromise;
   }
 
   if (completeMessages.has(message)) {
-    return;
+    return completedNodes.get(message) ?? [NodeId()];
   }
 
   completeMessages.add(message);
@@ -99,34 +110,44 @@ const handleBroadcast = async (
       !(sendedSet.has(node) || pathSet.has(node))
     ),
   );
-
-  const inflightPromise = Promise.resolve([...peerSet.values()])
-    .then(async (unsendPeers) => {
-      await Promise.all(
-        unsendPeers.map((peer) => sendBroadcastPeer(peer, message)),
-      );
-      return;
-    });
+  const remaining = [...peerSet.values()];
+  if (remaining.length === 0) {
+    return [NodeId()];
+  }
 
   const newIncompleteMessage: IncompleteMessageInfo = {
     path: pathSet,
-    inflightPromise,
+    inflightPromise: Promise.resolve().then(async () => {
+      await Promise.all(
+        remaining.map((peer) => sendBroadcastPeer(peer, message)),
+      )
+      markComplete(newIncompleteMessage, NodeId());
+      const sendNodes = [...newIncompleteMessage.sendNodes.values()]
+      completedNodes.set(message, sendNodes)
+      return sendNodes
+    }),
     sendNodes: sendedSet,
     unsendPeers: peerSet,
     timeout,
+    srcFeedback: new Map(feedback ? [[src, feedback]] : []),
   };
 
   incompleteMessages.set(message, newIncompleteMessage);
-  const interval: ReturnType<typeof setInterval> | undefined = feedback
-    ? setInterval(() => {
+  const interval = setInterval(() => {
+    const sendeds = [...newIncompleteMessage.sendNodes.values()];
+    for (const feedback of newIncompleteMessage.srcFeedback.values()) {
       feedback({
-        sendeds: [...newIncompleteMessage.sendNodes.values()],
+        sendeds,
       });
-    }, timeout / 2)
-    : undefined;
+    }
+  }, timeout);
+
+  feedback?.({
+    sendeds: [...newIncompleteMessage.sendNodes.values()],
+  });
 
   try {
-    return await inflightPromise;
+    return await newIncompleteMessage.inflightPromise;
   } finally {
     incompleteMessages.delete(message);
     clearInterval(interval);
@@ -141,25 +162,26 @@ handle<
 });
 
 handle<
-  { message: number }
->("broadcast", async (_src, req, reply) => {
-  await handleBroadcast(req.message, [], [NodeId()], 500);
+  Broadcast
+>("broadcast", async (src, req, reply) => {
+  await handleBroadcast(src, req.message, [], [NodeId()], 250);
   reply();
 });
 
 handle<
   PeerBroadcast,
-  undefined,
+  { sendeds: NodeIdType[] },
   { sendeds: NodeIdType[] }
->("broadcast_peer", async (_src, req, reply, feedback) => {
-  await handleBroadcast(
+>("broadcast_peer", async (src, req, reply, feedback) => {
+  const data = await handleBroadcast(
+    src,
     req.message,
     req.sendeds,
     req.path,
     req.timeout,
     feedback,
   );
-  reply();
+  reply({sendeds: data});
 });
 
 handle<{}, { messages: number[] }>("read", (_src, req, reply) => {

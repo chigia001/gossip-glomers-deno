@@ -1,4 +1,4 @@
-export type NodeIdType = `n${number}`;
+export type NodeIdType = `${"n" | "c"}${number}`;
 
 let nodeId: NodeIdType;
 let nodeIds: NodeIdType[] = [];
@@ -110,9 +110,7 @@ export const rpcWithFeedback = <
     }
 
     timeoutReturn = setTimeout(() => {
-      if (!abortController.signal.aborted) {
-        abortController.abort(abortController.signal.reason);
-      }
+      abortController.abort(abortController.signal.reason);
     }, timeout);
   };
 
@@ -133,7 +131,7 @@ export const rpcWithFeedback = <
 
 type Handler<RequestBody, ResponseBody = undefined, FeedbackBody = undefined> =
   (
-    src: string,
+    src: NodeIdType,
     req: RequestBody,
     reply: ResponseBody extends undefined ? () => void
       : (res: ResponseBody) => void,
@@ -176,7 +174,7 @@ export const init = async () => {
       }
       try {
         const req = JSON.parse(text.trim()) as Message;
-        const src = req.src;
+        const src = req.src as NodeIdType;
         const type = req.body.type;
         const msgId = req.body.msg_id;
         const inReplyTo = req.body.in_reply_to;
