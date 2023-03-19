@@ -11,6 +11,7 @@ interface MessageBody {
   type: string;
   msg_id: number;
   in_reply_to?: number;
+  in_feedback_to?: number;
 }
 
 interface Message {
@@ -44,44 +45,114 @@ export const send = <RequestBody extends Omit<MessageBody, "msg_id">>(
   return msgId;
 };
 
-export const rpc = async <
+export const rpc = <
   RequestBody extends Omit<MessageBody, "msg_id">,
-  ResponseBody extends Omit<MessageBody, "msg_id">,
->(dest: string, body: RequestBody): Promise<ResponseBody> => {
-  while (true) {
-    const msgId = send(dest, body);
-    try {
-      const resp = await new Promise<ResponseBody>((resolve, reject) => {
-        rpcPromiseMap.set(msgId, {
-          resolve,
-          reject,
-        });
+  ResponseBody extends {},
+>(
+  dest: string,
+  body: RequestBody,
+  abortSignal?: AbortSignal,
+): [number, Promise<ResponseBody>] => {
+  const msgId = send(dest, body);
+  const promise = new Promise<ResponseBody>((resolve, reject) => {
+    rpcPromiseMap.set(msgId, {
+      resolve,
+      reject,
+    });
 
-        setTimeout(() => {
-          reject();
-        }, 500);
-      });
-      return resp;
-    } catch {
-        console.warn("retrying")
-    }finally {
-      rpcPromiseMap.delete(msgId);
+    if (abortSignal?.aborted) {
+      reject(abortSignal.reason);
     }
-  }
+
+    abortSignal?.addEventListener("abort", () => {
+      reject(abortSignal.reason);
+    });
+  });
+
+  promise.catch(() => {
+    console.warn("ignore 1")
+  }).finally(() => {
+    rpcPromiseMap.delete(msgId);
+  });
+  return [msgId, promise];
 };
 
-type Handler<RequestBody, ResponseBody = undefined> = ResponseBody extends
-  undefined ? (src: string, req: RequestBody, reply: () => void) => void
-  : (src: string, req: RequestBody, reply: (res: ResponseBody) => void) => void;
+const rpcFeedbackMap = new Map<number, (body: any) => void>();
+
+export const rpcWithFeedback = <
+  RequestBody extends Omit<MessageBody, "msg_id">,
+  ResponseBody extends {},
+  FeedbackBody extends {},
+>(
+  dest: string,
+  body: RequestBody,
+  feedbackCallback: (feedbackBody: FeedbackBody) => void,
+  { abortSignal, timeout = 500 }: {
+    abortSignal?: AbortSignal;
+    timeout?: number;
+  },
+): Promise<ResponseBody> => {
+  const abortController = new AbortController();
+  abortSignal?.addEventListener("abort", () => {
+    abortController.abort("test 2");
+  });
+
+  const [msgId, rpcPromise] = rpc<RequestBody, ResponseBody>(
+    dest,
+    body,
+    abortController.signal,
+  );
+
+  let timeoutReturn: ReturnType<typeof setTimeout> | undefined;
+  const resetTimeout = () => {
+    if (timeoutReturn) {
+      clearTimeout(timeoutReturn);
+    }
+
+    timeoutReturn = setTimeout(() => {
+      if (!abortController.signal.aborted) {
+        abortController.abort(abortController.signal.reason);
+      }
+    }, timeout);
+  };
+
+  const feedbackHandler = (feedbackBody: FeedbackBody) => {
+    resetTimeout();
+    feedbackCallback(feedbackBody);
+  };
+  resetTimeout();
+  rpcFeedbackMap.set(msgId, feedbackHandler);
+  rpcPromise.catch(() => {
+    console.warn("ignore 2")
+  }).finally(() => {
+    rpcFeedbackMap.delete(msgId);
+    clearTimeout(timeoutReturn);
+  })
+  return rpcPromise;
+};
+
+type Handler<RequestBody, ResponseBody = undefined, FeedbackBody = undefined> =
+  (
+    src: string,
+    req: RequestBody,
+    reply: ResponseBody extends undefined ? () => void
+      : (res: ResponseBody) => void,
+    feedback: FeedbackBody extends undefined ? () => void
+      : (res: FeedbackBody) => void,
+  ) => void;
 
 const handlers = new Map<
   string,
-  (src: string, req: any, reply: (res?: any) => void) => void
+  Handler<any, any, any>
 >();
 
-export const handle = <RequestBody, ResponseBody = undefined>(
+export const handle = <
+  RequestBody,
+  ResponseBody = undefined,
+  FeedbackBody = undefined,
+>(
   event: string,
-  callback: Handler<RequestBody, ResponseBody>,
+  callback: Handler<RequestBody, ResponseBody, FeedbackBody>,
 ) => {
   handlers.set(event, callback);
 };
@@ -109,6 +180,7 @@ export const init = async () => {
         const type = req.body.type;
         const msgId = req.body.msg_id;
         const inReplyTo = req.body.in_reply_to;
+        const inFeedbackTo = req.body.in_feedback_to;
 
         if (inReplyTo !== undefined) {
           const defer = rpcPromiseMap.get(inReplyTo);
@@ -117,6 +189,9 @@ export const init = async () => {
           } else {
             defer?.resolve(req.body);
           }
+          continue;
+        } else if (inFeedbackTo !== undefined) {
+          rpcFeedbackMap.get(inFeedbackTo)?.(req.body);
           continue;
         }
         const reply = (res: Omit<MessageBody, "msg_id">): void => {
@@ -127,9 +202,17 @@ export const init = async () => {
           });
         };
 
+        const feedback = (res: Omit<MessageBody, "msg_id">): void => {
+          send(src, {
+            ...res,
+            type: `${type}_feedback`,
+            in_feedback_to: msgId,
+          });
+        };
+
         const handler = handlers.get(type);
         if (handler) {
-          handler(src, req.body, reply);
+          handler(src, req.body, reply, feedback);
         } else {
           send(src, {
             type: "error",
