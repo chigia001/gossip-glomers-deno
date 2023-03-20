@@ -129,6 +129,10 @@ const handleBroadcast = (
     path.forEach((node) => {
       incompleteMessage.path.add(node);
       incompleteMessage.unsendPeers.delete(node);
+      incompleteMessage.peerAbortController.get(node)?.abort({
+        code: 14,
+        text: "aborted"
+      })
     });
     if (feedback) {
       incompleteMessage.srcFeedback.set(src, feedback);

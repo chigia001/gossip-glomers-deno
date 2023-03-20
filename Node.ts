@@ -62,6 +62,7 @@ export const send = <RequestBody extends Omit<MessageBody, "msg_id">>(
 ): number => {
   const [msgId, standardizeBody] = standardMessageBody(body);
   if (dest.startsWith("c")) {
+    // client don't understand batching so just send directly
     send_internal(dest, [standardizeBody]);
   } else {
     const queue = batchingQueue.get(dest);
