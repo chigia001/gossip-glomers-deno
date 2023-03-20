@@ -208,9 +208,21 @@ export const init = async () => {
           });
         };
 
+        const error = (res: any): void => {
+          send(src, {
+            ...res,
+            type: `error`,
+            in_reply_to: msgId,
+          })
+        }
+
         const handler = handlers.get(type);
         if (handler) {
-          handler(src, req.body, reply, feedback);
+          Promise.resolve()
+            .then(() => handler(src, req.body, reply, feedback))
+            .catch((err) => {
+              error(err)
+            });
         } else {
           send(src, {
             type: "error",
