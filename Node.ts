@@ -1,3 +1,5 @@
+import { batchWindow } from "./config.ts";
+
 export type NodeIdType = `${"n" | "c"}${number}`;
 
 let nodeId: NodeIdType;
@@ -11,7 +13,11 @@ interface MessageBody {
   type: string;
   msg_id: number;
   in_reply_to?: number;
-  in_feedback_to?: number;
+}
+
+interface MessageBatchBody extends MessageBody {
+  type: "batch";
+  messages: MessageBody[];
 }
 
 interface Message {
@@ -25,23 +31,52 @@ const rpcPromiseMap = new Map<number, {
   reject: (error: any) => void;
 }>();
 
+const standardMessageBody = <RequestBody extends Omit<MessageBody, "msg_id">>(
+  body: RequestBody,
+): [number, MessageBody] => {
+  const msgId = msgCounter++;
+  return [msgId, {
+    ...body,
+    msg_id: msgId,
+  }];
+};
+
+const send_internal = (dest: string, body: MessageBody[]) => {
+  const src = nodeId;
+  // send message to STDOUT
+  console.log(JSON.stringify({
+    src,
+    dest,
+    body: body.length === 1 ? body[0] : standardMessageBody({
+      type: "batch",
+      messages: body,
+    })[1] as MessageBatchBody,
+  }));
+};
+
+const batchingQueue = new Map<NodeIdType, MessageBody[]>();
+
 export const send = <RequestBody extends Omit<MessageBody, "msg_id">>(
-  dest: string,
+  dest: NodeIdType,
   body: RequestBody,
 ): number => {
-  const msgId = msgCounter++;
-  const serialize = JSON.stringify(
-    {
-      src: nodeId,
-      dest,
-      body: {
-        ...body,
-        msg_id: msgId,
-      },
-    } satisfies Message,
-  );
-  // send message to STDOUT
-  console.log(serialize);
+  const [msgId, standardizeBody] = standardMessageBody(body);
+  if (dest.startsWith("c")) {
+    send_internal(dest, [standardizeBody]);
+  } else {
+    const queue = batchingQueue.get(dest);
+    if (queue) {
+      queue.push(standardizeBody);
+    } else {
+      const newQueue = [standardizeBody];
+      batchingQueue.set(dest, newQueue);
+      setTimeout(() => {
+        batchingQueue.delete(dest);
+        send_internal(dest, newQueue);
+      }, batchWindow);
+    }
+  }
+
   return msgId;
 };
 
@@ -49,7 +84,7 @@ export const rpc = <
   RequestBody extends Omit<MessageBody, "msg_id">,
   ResponseBody extends {},
 >(
-  dest: string,
+  dest: NodeIdType,
   body: RequestBody,
   abortSignal?: AbortSignal,
 ): [number, Promise<ResponseBody>] => {
@@ -70,7 +105,7 @@ export const rpc = <
   });
 
   promise.catch(() => {
-    console.warn("ignore 1")
+    console.warn("ignore 1");
   }).finally(() => {
     rpcPromiseMap.delete(msgId);
   });
@@ -84,7 +119,7 @@ export const rpcWithFeedback = <
   ResponseBody extends {},
   FeedbackBody extends {},
 >(
-  dest: string,
+  dest: NodeIdType,
   body: RequestBody,
   feedbackCallback: (feedbackBody: FeedbackBody) => void,
   { abortSignal, timeout = 500 }: {
@@ -94,7 +129,7 @@ export const rpcWithFeedback = <
 ): Promise<ResponseBody> => {
   const abortController = new AbortController();
   abortSignal?.addEventListener("abort", () => {
-    abortController.abort("test 2");
+    abortController.abort(abortSignal.reason);
   });
 
   const [msgId, rpcPromise] = rpc<RequestBody, ResponseBody>(
@@ -110,7 +145,10 @@ export const rpcWithFeedback = <
     }
 
     timeoutReturn = setTimeout(() => {
-      abortController.abort(abortController.signal.reason);
+      abortController.abort({
+        code: 0,
+        text: "network timeout",
+      });
     }, timeout);
   };
 
@@ -121,11 +159,11 @@ export const rpcWithFeedback = <
   resetTimeout();
   rpcFeedbackMap.set(msgId, feedbackHandler);
   rpcPromise.catch(() => {
-    console.warn("ignore 2")
+    console.warn("ignore 2");
   }).finally(() => {
     rpcFeedbackMap.delete(msgId);
     clearTimeout(timeoutReturn);
-  })
+  });
   return rpcPromise;
 };
 
@@ -164,6 +202,65 @@ handle<{
   reply();
 });
 
+const handleRequest = (src: NodeIdType, body: MessageBody) => {
+  const type = body.type;
+  const msgId = body.msg_id;
+  const inReplyTo = body.in_reply_to;
+
+  if (inReplyTo !== undefined) {
+    Promise.resolve().then(() => {
+      if (type === "error") {
+        rpcPromiseMap.get(inReplyTo)?.reject(body);
+      } else if (type.endsWith("_ok")) {
+        rpcPromiseMap.get(inReplyTo)?.resolve(body);
+      } else if (type.endsWith("_feedback")) {
+        rpcFeedbackMap.get(inReplyTo)?.(body);
+      }
+    });
+    return;
+  }
+
+  const reply = (res: Omit<MessageBody, "msg_id">): void => {
+    send(src, {
+      ...res,
+      type: `${type}_ok`,
+      in_reply_to: msgId,
+    });
+  };
+
+  const feedback = (res: Omit<MessageBody, "msg_id">): void => {
+    send(src, {
+      ...res,
+      type: `${type}_feedback`,
+      in_reply_to: msgId,
+    });
+  };
+
+  const error = (res: any): void => {
+    send(src, {
+      ...res,
+      type: `error`,
+      in_reply_to: msgId,
+    });
+  };
+
+  const handler = handlers.get(type);
+  if (handler) {
+    Promise.resolve()
+      .then(() => handler(src, body, reply, feedback))
+      .catch((err) => {
+        error(err);
+      });
+  } else {
+    send(src, {
+      type: "error",
+      in_reply_to: msgId,
+      code: 10,
+      text: `Don't have handler for event ${type}`,
+    });
+  }
+};
+
 export const init = async () => {
   const decoder = new TextDecoder();
   for await (const chunk of Deno.stdin.readable) {
@@ -176,60 +273,13 @@ export const init = async () => {
         const req = JSON.parse(text.trim()) as Message;
         const src = req.src as NodeIdType;
         const type = req.body.type;
-        const msgId = req.body.msg_id;
-        const inReplyTo = req.body.in_reply_to;
-        const inFeedbackTo = req.body.in_feedback_to;
-
-        if (inReplyTo !== undefined) {
-          const defer = rpcPromiseMap.get(inReplyTo);
-          if (type === "error") {
-            defer?.reject(req.body);
-          } else {
-            defer?.resolve(req.body);
-          }
-          continue;
-        } else if (inFeedbackTo !== undefined) {
-          rpcFeedbackMap.get(inFeedbackTo)?.(req.body);
-          continue;
-        }
-        const reply = (res: Omit<MessageBody, "msg_id">): void => {
-          send(src, {
-            ...res,
-            type: `${type}_ok`,
-            in_reply_to: msgId,
+        if (type === "batch") {
+          const messages = (req.body as MessageBatchBody).messages;
+          messages.forEach((message) => {
+            handleRequest(src, message);
           });
-        };
-
-        const feedback = (res: Omit<MessageBody, "msg_id">): void => {
-          send(src, {
-            ...res,
-            type: `${type}_feedback`,
-            in_feedback_to: msgId,
-          });
-        };
-
-        const error = (res: any): void => {
-          send(src, {
-            ...res,
-            type: `error`,
-            in_reply_to: msgId,
-          })
-        }
-
-        const handler = handlers.get(type);
-        if (handler) {
-          Promise.resolve()
-            .then(() => handler(src, req.body, reply, feedback))
-            .catch((err) => {
-              error(err)
-            });
         } else {
-          send(src, {
-            type: "error",
-            in_reply_to: msgId,
-            code: 10,
-            text: `Don't have handler for event ${type}`,
-          });
+          handleRequest(src, req.body);
         }
       } catch {
         console.warn(`Error: ${text}`);

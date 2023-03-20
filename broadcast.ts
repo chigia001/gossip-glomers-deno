@@ -1,41 +1,53 @@
 #!/usr/bin/env -S deno run --allow-env
 import { handle, init, NodeId, NodeIdType, rpcWithFeedback } from "./Node.ts";
+import { timeout } from "./config.ts";
+
 let topology: Record<NodeIdType, NodeIdType[]>;
 // message that successfully consumed and already broardcast to peer with confirmation
-const completeMessages = new Set<number>();
+const completeMessages = new Map<number, NodeIdType[]>();
 const completedNodes = new Map<number, NodeIdType[]>();
 
 interface IncompleteMessageInfo {
-  haveUpdate: boolean
+  haveUpdate: boolean;
   path: Set<NodeIdType>;
   sendNodes: Set<NodeIdType>;
-  timeout: number;
   unsendPeers: Set<NodeIdType>;
   inflightPromise: Promise<NodeIdType[]>;
   srcFeedback: Map<NodeIdType, (param: PeerInform) => void>;
-  abortController: Map<NodeIdType, AbortController>;
+  srcAbortController: Map<NodeIdType, AbortController>;
+  peerAbortController: Map<NodeIdType, AbortController>;
 }
 
 const markComplete = (info: IncompleteMessageInfo, nodeId: NodeIdType) => {
   info.srcFeedback.delete(nodeId);
   info.unsendPeers.delete(nodeId);
+  info.peerAbortController.get(nodeId)?.abort({
+    code: 14,
+    text: "aborted because already done"
+  })
   if (!info.sendNodes.has(nodeId)) {
     info.sendNodes.add(nodeId);
-    info.haveUpdate = true
+    info.haveUpdate = true;
   }
 };
 
-const promiseWrapper = (info: IncompleteMessageInfo, nodeId: NodeIdType): Promise<NodeIdType[]> => {
-  info.abortController.get(nodeId)?.abort()
+const promiseWrapper = (
+  info: IncompleteMessageInfo,
+  nodeId: NodeIdType,
+): Promise<NodeIdType[]> => {
+  info.srcAbortController.get(nodeId)?.abort({
+    code: 14,
+    text: "new request from same src, abort old request"
+  });
   return new Promise((resolve, reject) => {
-    const abortController = new AbortController()
-    info.abortController.set(nodeId, abortController)
+    const abortController = new AbortController();
+    info.srcAbortController.set(nodeId, abortController);
     abortController.signal.addEventListener("abort", () => {
-      reject
-    })
-    info.inflightPromise.then(resolve);
-  })
-}
+      reject;
+    });
+    info.inflightPromise.then(resolve, reject);
+  });
+};
 const incompleteMessages = new Map<number, IncompleteMessageInfo>();
 
 interface Broadcast {
@@ -47,7 +59,6 @@ interface PeerBroadcast {
   message: number;
   sendeds: NodeIdType[];
   path: NodeIdType[];
-  timeout: number;
 }
 
 interface PeerInform {
@@ -55,8 +66,7 @@ interface PeerInform {
 }
 
 const sendBroadcastPeer = async (dest: NodeIdType, message: number) => {
-  let counter = 3
-  while (counter--) {
+  while (true) {
     try {
       const incompleteMessage = incompleteMessages.get(message);
       if (!incompleteMessage || !incompleteMessage.unsendPeers.has(dest)) {
@@ -79,11 +89,11 @@ const sendBroadcastPeer = async (dest: NodeIdType, message: number) => {
           message,
           sendeds: [...incompleteMessage.sendNodes.values()],
           path: [...incompleteMessage.path.values(), dest],
-          timeout: incompleteMessage.timeout,
         },
         feedback,
         {
-          timeout: incompleteMessage.timeout,
+          timeout,
+          abortSignal: incompleteMessage.peerAbortController.get(dest)?.signal
         },
       );
       sendeds.forEach((node) => {
@@ -92,8 +102,14 @@ const sendBroadcastPeer = async (dest: NodeIdType, message: number) => {
 
       markComplete(incompleteMessage, dest);
       return;
-    } catch {
-      console.warn("retry");
+    } catch (err) {
+      if (err.code === 14) {
+        return;
+      } else if (err.code === 0) {
+        console.warn("retry");
+      } else {
+        throw err
+      }
     }
   }
 };
@@ -103,7 +119,6 @@ const handleBroadcast = (
   message: number,
   sendeds: NodeIdType[],
   path: NodeIdType[],
-  timeout: number,
   feedback?: (param: PeerInform) => void,
 ): Promise<NodeIdType[]> => {
   const incompleteMessage = incompleteMessages.get(message);
@@ -118,14 +133,14 @@ const handleBroadcast = (
     if (feedback) {
       incompleteMessage.srcFeedback.set(src, feedback);
     }
-    return promiseWrapper(incompleteMessage, src)
+    return promiseWrapper(incompleteMessage, src);
+  }
+  const completeNodes = completeMessages.get(message)
+  if (completeNodes && completeNodes.length > 0) {
+    return Promise.resolve(completeNodes);
   }
 
-  if (completeMessages.has(message)) {
-    return Promise.resolve(completedNodes.get(message) ?? [NodeId()]);
-  }
-
-  completeMessages.add(message);
+  completeMessages.set(message, []);
   const pathSet = new Set(path);
   const sendedSet = new Set(sendeds);
   const peerSet = new Set(
@@ -135,7 +150,10 @@ const handleBroadcast = (
   );
   const remaining = [...peerSet.values()];
   if (remaining.length === 0) {
-    return Promise.resolve([NodeId()]);
+    sendedSet.add(NodeId())
+    const newSendeds = [...sendedSet.values()]
+    completeMessages.set(message, newSendeds)
+    return Promise.resolve(newSendeds);
   }
 
   const newIncompleteMessage: IncompleteMessageInfo = {
@@ -152,9 +170,9 @@ const handleBroadcast = (
     }),
     sendNodes: sendedSet,
     unsendPeers: peerSet,
-    timeout,
     srcFeedback: new Map(feedback ? [[src, feedback]] : []),
-    abortController: new Map(),
+    srcAbortController: new Map(),
+    peerAbortController: new Map(remaining.map((node) => [node, new AbortController()]))
   };
 
   incompleteMessages.set(message, newIncompleteMessage);
@@ -166,16 +184,20 @@ const handleBroadcast = (
           sendeds,
         });
       }
-      newIncompleteMessage.haveUpdate = false
+      newIncompleteMessage.haveUpdate = false;
     }
   }, timeout);
 
-  newIncompleteMessage.inflightPromise.finally(() => {
+  newIncompleteMessage.inflightPromise.then((value) => {
+    completeMessages.set(message, value)
+  }, () => {
+    console.warn("ignore")
+  }).finally(() => {
     incompleteMessages.delete(message);
     clearInterval(interval);
   });
 
-  return promiseWrapper(newIncompleteMessage, src)
+  return promiseWrapper(newIncompleteMessage, src);
 };
 
 handle<
@@ -188,7 +210,7 @@ handle<
 handle<
   Broadcast
 >("broadcast", async (src, req, reply) => {
-  await handleBroadcast(src, req.message, [], [NodeId()], 1000);
+  await handleBroadcast(src, req.message, [], [NodeId()]);
   reply();
 });
 
@@ -202,7 +224,6 @@ handle<
     req.message,
     req.sendeds,
     req.path,
-    req.timeout,
     feedback,
   );
   reply({ sendeds: data });
@@ -210,7 +231,7 @@ handle<
 
 handle<{}, { messages: number[] }>("read", (_src, req, reply) => {
   reply({
-    messages: [...completeMessages.values()],
+    messages: [...completeMessages.keys()],
   });
 });
 
