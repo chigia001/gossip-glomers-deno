@@ -29,6 +29,7 @@ const markComplete = (info: IncompleteMessageInfo, nodeId: NodeIdType) => {
     info.sendNodes.add(nodeId);
     info.haveUpdate = true;
   }
+  info.path.delete(nodeId)
 };
 
 const promiseWrapper = (
@@ -123,9 +124,6 @@ const handleBroadcast = (
 ): Promise<NodeIdType[]> => {
   const incompleteMessage = incompleteMessages.get(message);
   if (incompleteMessage) {
-    sendeds.forEach((node) => {
-      markComplete(incompleteMessage, node);
-    });
     path.forEach((node) => {
       incompleteMessage.path.add(node);
       incompleteMessage.unsendPeers.delete(node);
@@ -133,6 +131,9 @@ const handleBroadcast = (
         code: 14,
         text: "aborted"
       })
+    });
+    sendeds.forEach((node) => {
+      markComplete(incompleteMessage, node);
     });
     if (hearthbeath) {
       incompleteMessage.srcHearthbeat.set(src, hearthbeath);

@@ -1,2 +1,2 @@
-export const timeout = 500
-export const batchWindow = 100
+export const timeout = 250
+export const batchWindow = 50
