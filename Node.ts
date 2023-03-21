@@ -214,14 +214,14 @@ const handleRequest = (src: NodeIdType, body: MessageBody) => {
         rpcPromiseMap.get(inReplyTo)?.reject(body);
       } else if (type.endsWith("_ok")) {
         rpcPromiseMap.get(inReplyTo)?.resolve(body);
-      } else if (type.endsWith("_feedback")) {
+      } else if (type.endsWith("_hearthbeat")) {
         rpcFeedbackMap.get(inReplyTo)?.(body);
       }
     });
     return;
   }
 
-  const reply = (res: Omit<MessageBody, "msg_id">): void => {
+  const ok = (res: Omit<MessageBody, "msg_id">): void => {
     send(src, {
       ...res,
       type: `${type}_ok`,
@@ -229,10 +229,10 @@ const handleRequest = (src: NodeIdType, body: MessageBody) => {
     });
   };
 
-  const feedback = (res: Omit<MessageBody, "msg_id">): void => {
+  const heartbeat = (res: Omit<MessageBody, "msg_id">): void => {
     send(src, {
       ...res,
-      type: `${type}_feedback`,
+      type: `${type}_hearthbeat`,
       in_reply_to: msgId,
     });
   };
@@ -248,7 +248,7 @@ const handleRequest = (src: NodeIdType, body: MessageBody) => {
   const handler = handlers.get(type);
   if (handler) {
     Promise.resolve()
-      .then(() => handler(src, body, reply, feedback))
+      .then(() => handler(src, body, ok, heartbeat))
       .catch((err) => {
         error(err);
       });

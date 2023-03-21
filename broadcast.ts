@@ -13,13 +13,13 @@ interface IncompleteMessageInfo {
   sendNodes: Set<NodeIdType>;
   unsendPeers: Set<NodeIdType>;
   inflightPromise: Promise<NodeIdType[]>;
-  srcFeedback: Map<NodeIdType, (param: PeerInform) => void>;
+  srcHearthbeat: Map<NodeIdType, (param: PeerInform) => void>;
   srcAbortController: Map<NodeIdType, AbortController>;
   peerAbortController: Map<NodeIdType, AbortController>;
 }
 
 const markComplete = (info: IncompleteMessageInfo, nodeId: NodeIdType) => {
-  info.srcFeedback.delete(nodeId);
+  info.srcHearthbeat.delete(nodeId);
   info.unsendPeers.delete(nodeId);
   info.peerAbortController.get(nodeId)?.abort({
     code: 14,
@@ -119,7 +119,7 @@ const handleBroadcast = (
   message: number,
   sendeds: NodeIdType[],
   path: NodeIdType[],
-  feedback?: (param: PeerInform) => void,
+  hearthbeath?: (param: PeerInform) => void,
 ): Promise<NodeIdType[]> => {
   const incompleteMessage = incompleteMessages.get(message);
   if (incompleteMessage) {
@@ -134,8 +134,8 @@ const handleBroadcast = (
         text: "aborted"
       })
     });
-    if (feedback) {
-      incompleteMessage.srcFeedback.set(src, feedback);
+    if (hearthbeath) {
+      incompleteMessage.srcHearthbeat.set(src, hearthbeath);
     }
     return promiseWrapper(incompleteMessage, src);
   }
@@ -174,7 +174,7 @@ const handleBroadcast = (
     }),
     sendNodes: sendedSet,
     unsendPeers: peerSet,
-    srcFeedback: new Map(feedback ? [[src, feedback]] : []),
+    srcHearthbeat: new Map(hearthbeath ? [[src, hearthbeath]] : []),
     srcAbortController: new Map(),
     peerAbortController: new Map(remaining.map((node) => [node, new AbortController()]))
   };
@@ -183,14 +183,14 @@ const handleBroadcast = (
   const interval = setInterval(() => {
     if (newIncompleteMessage.haveUpdate) {
       const sendeds = [...newIncompleteMessage.sendNodes.values()];
-      for (const feedback of newIncompleteMessage.srcFeedback.values()) {
-        feedback({
+      for (const hearthbeat of newIncompleteMessage.srcHearthbeat.values()) {
+        hearthbeat({
           sendeds,
         });
       }
       newIncompleteMessage.haveUpdate = false;
     }
-  }, timeout);
+  }, timeout / 2);
 
   newIncompleteMessage.inflightPromise.then((value) => {
     completeMessages.set(message, value)
@@ -213,24 +213,31 @@ handle<
 
 handle<
   Broadcast
->("broadcast", async (src, req, reply) => {
-  await handleBroadcast(src, req.message, [], [NodeId()]);
-  reply();
+>("broadcast", (src, req, ok) => {
+  handleBroadcast(src, req.message, [], [NodeId()]);
+  ok();
 });
 
 handle<
   PeerBroadcast,
   { sendeds: NodeIdType[] },
   { sendeds: NodeIdType[] }
->("broadcast_peer", async (src, req, reply, feedback) => {
-  const data = await handleBroadcast(
-    src,
-    req.message,
-    req.sendeds,
-    req.path,
-    feedback,
-  );
-  reply({ sendeds: data });
+>("broadcast_peer", async (src, req, ok, hearthbeath) => {
+  try {
+    const data = await handleBroadcast(
+      src,
+      req.message,
+      req.sendeds,
+      req.path,
+      hearthbeath,
+    );
+    ok({ sendeds: data });
+  } catch (e) {
+    if (e.code === 14) {
+      return
+    }
+    throw e
+  }
 });
 
 handle<{}, { messages: number[] }>("read", (_src, req, reply) => {
