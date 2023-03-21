@@ -18,19 +18,31 @@ interface IncompleteMessageInfo {
   peerAbortController: Map<NodeIdType, AbortController>;
 }
 
-const markComplete = (info: IncompleteMessageInfo, nodeId: NodeIdType) => {
-  info.srcHearthbeat.delete(nodeId);
+const removePeers = (info: IncompleteMessageInfo, nodeId: NodeIdType) => {
   info.unsendPeers.delete(nodeId);
   info.peerAbortController.get(nodeId)?.abort({
     code: 14,
     text: "aborted because already done"
   })
+}
+
+const markComplete = (info: IncompleteMessageInfo, nodeId: NodeIdType) => {
+  info.srcHearthbeat.delete(nodeId);
+
   if (!info.sendNodes.has(nodeId)) {
     info.sendNodes.add(nodeId);
     info.haveUpdate = true;
   }
   info.path.delete(nodeId)
+  removePeers(info, nodeId)
 };
+
+const markPath = (info: IncompleteMessageInfo, nodeId: NodeIdType) => {
+  if (!info.sendNodes.has(nodeId)) {
+    info.path.add(nodeId)
+  }
+  removePeers(info, nodeId)
+}
 
 const promiseWrapper = (
   info: IncompleteMessageInfo,
@@ -125,12 +137,7 @@ const handleBroadcast = (
   const incompleteMessage = incompleteMessages.get(message);
   if (incompleteMessage) {
     path.forEach((node) => {
-      incompleteMessage.path.add(node);
-      incompleteMessage.unsendPeers.delete(node);
-      incompleteMessage.peerAbortController.get(node)?.abort({
-        code: 14,
-        text: "aborted"
-      })
+      markPath(incompleteMessage, node)
     });
     sendeds.forEach((node) => {
       markComplete(incompleteMessage, node);
